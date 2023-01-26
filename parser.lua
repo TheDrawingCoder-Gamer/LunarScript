@@ -1,9 +1,10 @@
 local lunarp = {}
 
 local expr = require("expr")
---- @class Parser<T>: { run: fun(input: string): (T | boolean, string | nil) }
 local parser = { expr = {} }
-local parsermt = { __index = parser }
+--- @class Parser<T>: { run: fun(input: string): (T | boolean, string | nil) }
+parser.prototype = {}
+local parsermt = { __index = parser.prototype }
 
 local helpers = require 'helpers'
 local internals = {}
@@ -11,7 +12,7 @@ local internals = {}
 --- @generic T
 --- @param fun fun(input: string): (T | boolean, string | nil) 
 --- @return Parser<T>
-function parser:new(fun) --> Parser<T> 
+function parser.new(fun) --> Parser<T> 
   local parse = { run = fun }
   setmetatable(parse, parsermt)
   return parse
@@ -21,18 +22,18 @@ end
 
 --- @generic T
 --- @generic U
---- @param self Parser<T> 
---- @param p Parser<U>
+--- @param l Parser<T>
+--- @param r Parser<U> | fun(): Parser<U>
 --- @return Parser<{ left: T, right: U }>
-function parser:combined(p)
-  if getmetatable(p) ~= parsermt then
-    error("combined only works with parsers")
-  end
-  return parser:new(
+function parser.combined(l, r)
+  return parser.new(
     function (input)
-      local r1, rest = self.run(input)
+      local r1, rest = l.run(input)
       if rest then
-	local r2, newRest = p.run(rest)
+	if type(r) == "function" then
+	  r = r()
+	end
+	local r2, newRest = r.run(rest)
 	if newRest then
 	  return {left = r1, right = r2}, newRest
 	end
@@ -42,26 +43,28 @@ function parser:combined(p)
     end
   )
 end
+parser.prototype.combined = parser.combined
 --- @generic T
 --- @generic U
---- @param self Parser<T>
---- @param p Parser<U>
+--- @param l Parser<T>
+--- @param r Parser<U> | fun(): Parser<U>
 --- @return Parser<U>
-function parser:andThen(p)
-  return self:combined(p):map(
+function parser.andThen(l, r)
+  return parser.combined(l, r):map(
     function (i)
       local v = i.right
       return v
     end
   )
 end
+parser.prototype.andThen = parser.andThen
 --- @generic T
 --- @generic U 
---- @param self Parser<T>
---- @param p Parser<U>
+--- @param l Parser<T>
+--- @param r Parser<U> | fun(): Parser<U>
 --- @return Parser<T>
-function parser:thenDiscard(p)
-  return self:combined(p):map(
+function parser.thenDiscard(l, r)
+  return parser.combined(l, r):map(
     function (i)
       -- Map never gives me a nil
       local v = i.left
@@ -69,13 +72,14 @@ function parser:thenDiscard(p)
     end
   )
 end
+parser.prototype.thenDiscard = parser.thenDiscard
 --- @generic T 
 --- @generic R 
 --- @param self Parser<T>
 --- @param fun fun(T): R 
 --- @return Parser<R>
 function parser:map(fun)
-  return parser:new(
+  return parser.new(
     function (input)
       local v, rest = self.run(input)
       if rest then
@@ -86,13 +90,14 @@ function parser:map(fun)
     end
   )
 end
+parser.prototype.map = parser.map
 --- @generic T 
 --- @generic R 
 --- @param self Parser<T>
 --- @param fun fun(T): Parser<R>
 --- @return Parser<R>
 function parser:flatMap(fun)
-  return parser:new(
+  return parser.new(
     function (input)
       local v, rest = self.run(input)
       if rest then
@@ -103,6 +108,7 @@ function parser:flatMap(fun)
     end
   )
 end
+parser.prototype.flatMap = parser.flatMap
 --- @generic T 
 --- @generic V 
 --- @param self Parser<T> 
@@ -112,7 +118,7 @@ function parser:untilParse(p)
   if getmetatable(p) ~= parsermt then
     error("combined only works with parsers")
   end
-  return parser:new(
+  return parser.new(
     function (input)
       local cur = input
       local values = {}
@@ -132,12 +138,13 @@ function parser:untilParse(p)
     end
   )
 end
+parser.prototype.untilParser = parser.untilParse
 --- @generic T 
 --- @param self Parser<T>
 --- @return Parser<T[]>
 -- remember to debug this stinky function
 function parser:rep()
-  return parser:new(
+  return parser.new(
     function (input)
       local cur = input
       local v = nil
@@ -158,20 +165,22 @@ function parser:rep()
     end
   )
 end
+parser.prototype.rep = parser.rep
 --- @generic T 
 --- @param self Parser<T> 
 --- @return Parser<T[]> 
 function parser:rep0()
   return self:rep():orElse(parser.pure({}))
 end
-parser.many = parser.rep0
+parser.prototype.many = parser.rep0
+parser.prototype.rep0 = parser.rep0
 --- @generic T 
 --- @param self Parser<T> 
 --- @param sep Parser<any>
 --- @return Parser<T[]>
 -- this one is smelly too
 function parser:repSep0(sep)
-  return parser:new(
+  return parser.new(
     function(input)
       local cur = input
       local v = nil
@@ -194,6 +203,7 @@ function parser:repSep0(sep)
     end
   )
 end
+parser.prototype.repSep0 = parser.repSep0
 --- @generic T 
 --- @generic R 
 --- @param self Parser<fun(i: T): R>
@@ -206,9 +216,10 @@ function parser:ap(fa)
     end
   )
 end
+parser.prototype.ap = parser.ap
 --- @generic T 
---- @param self Parser<T>
---- @param start Parser<any>
+--- @param self Parser<T> 
+-- @param start Parser<any>
 --- @param ending Parser<any>
 --- @return Parser<T>
 function parser:between(start, ending)
@@ -217,22 +228,33 @@ function parser:between(start, ending)
   end
   return start:andThen(self):thenDiscard(ending)
 end
+parser.prototype.between = parser.between
+--- @generic T 
+--- @param start Parser<any> 
+--- @param p fun(): Parser<T>  
+--- @param ending Parser<any> 
+--- @return fun(): Parser<T> 
+function parser.lazyBetween(start, p, ending)
+  return function()
+    return start:andThen(p()):thenDiscard(ending)
+  end
+end
 --- @generic T 
 --- @generic U 
 --- @param self Parser<T>
---- @param p Parser<U>
+--- @param p Parser<U> | fun(): Parser<U>
 --- @return Parser<T | U>
 function parser:orElse(p)
-  if getmetatable(p) ~= parsermt then
-    error("orElse only works with parsers")
-  end
-  return parser:new(
+  return parser.new(
     function (input)
       local r, rest = self.run(input)
       if rest == nil then
 	if r then
 	  return true
 	else
+	  if type(p) == "function" then
+	    p = p()
+	  end
 	  return p.run(input)
 	end
       else
@@ -241,12 +263,13 @@ function parser:orElse(p)
     end
   )
 end
+parser.prototype.orElse = parser.orElse
 --- @generic T 
 --- @param self Parser<T>
 --- @return Parser<T>
 -- Enables backtracking on this parser.
 function parser:attempted() --> Parser<T>
-  return parser:new(
+  return parser.new(
     function (input)
       local r, rest = self.run(input)
       if not rest then
@@ -257,11 +280,12 @@ function parser:attempted() --> Parser<T>
     end
   )
 end
+parser.prototype.attempted = parser.attempted
 --- @generic T 
 --- @param self Parser<T> 
 --- @return Parser<nil>
 function parser:optional() --> Parser<nil>
-  return parser:new(
+  return parser.new(
     function (input)
       local r, rest = self.run(input)
       if not rest then
@@ -275,6 +299,7 @@ function parser:optional() --> Parser<nil>
     end
   )
 end
+parser.prototype.optional = parser.optional
 --- @generic T 
 --- @generic R 
 --- @param self Parser<T>
@@ -283,6 +308,7 @@ end
 function parser:as(value)
   return self:map(function (_) return value end)
 end
+parser.prototype.as = parser.as
 --- @generic T 
 --- @generic A 
 --- @param self Parser<T>
@@ -291,11 +317,12 @@ end
 function parser:foldLeft(k, f)
   return self:rep0():map(function (s) return helpers.foldLeft(s, k, f) end)
 end
+parser.prototype.foldLeft = parser.foldLeft
 --- @generic T
 --- @param value T 
 --- @return Parser<T>
 local function pure(value)
-  return parser:new(
+  return parser.new(
     function (input)
       return value, input
     end
@@ -315,7 +342,7 @@ local function prefix(op, p)
 end
 parser.prefix = prefix
 local function takeWhile(fun)
-  return parser:new(
+  return parser.new(
     function (input)
       local res = ""
       local cur = input
@@ -332,7 +359,7 @@ local function takeWhile(fun)
 end
 parser.takeWhile = takeWhile
 local anyChar =
-  parser:new(
+  parser.new(
     function (input)
       if input ~= "" then
 	return string.sub(input, 1, 1), string.sub(input, 2, -1)
@@ -342,7 +369,7 @@ local anyChar =
   )
 parser.anyChar = anyChar
 local function charWhere(fun)
-  return parser:new(
+  return parser.new(
     function (input)
       if input ~= "" and fun(string.sub(input, 1, 1)) then
 	return string.sub(input, 1, 1), string.sub(input, 2, -1)
@@ -381,7 +408,7 @@ internals.stake = stake
 --- @param p Parser<T>
 --- @return Parser<T>
 local function lexeme(p)
-  return parser:new(function (input)
+  return parser.new(function (input)
     local t, rest = p.run(input)
     if rest then
       return t, ltrim(rest)
@@ -410,7 +437,7 @@ local function operatorFn(subOnes, symbol)
   )
 end
 local function keyword(word) --> Parser<nil>
-  return lexeme(parser:new(function (input)
+  return lexeme(parser.new(function (input)
     local daWord, rest = stake(input, string.len(word))
     if word == daWord then
       return nil, rest
@@ -422,7 +449,7 @@ end
 parser.expr.keyword = keyword
 
 local function softKeyword(word) --> Parser<nil>
-  return lexeme(parser:new(function (input)
+  return lexeme(parser.new(function (input)
     local daWord, rest = stake(input, string.len(word))
     if word == daWord and ltrim(rest) == rest then
       return nil, rest
@@ -457,7 +484,7 @@ local identifier =
   )
 parser.identifier = identifier
 local stringParser =
-  lexeme(parser:new(
+  lexeme(parser.new(
     function (input)
       local cur = input
       local escaped = false
@@ -521,7 +548,7 @@ local stringParser =
   ):between(char('"'), char('"')))
 local validChars = "!#$%&*+-/:<=>?@^_|~\\"
 local function symbolFun(c)
-  return string.find(validChars, c) ~= nil
+  return string.find(validChars, c, 1, true) ~= nil
 end
 local operator =
   lexeme(takeWhile(symbolFun))
@@ -539,6 +566,7 @@ local function userDefinedOperator(startsWith)
     end
   )
 end
+parser.userDefinedOperator = userDefinedOperator
 local symbol = identifier:orElse(operator)
 --[==[
 local function braces(parser)
@@ -546,7 +574,7 @@ local function braces(parser)
 end
 --]==]
 local function parens(p)
-  return p:between(keyword('('), keyword(')'))
+  return parser.lazyBetween(lexeme(char('(')), p, lexeme(char(')')))
 end
 parser.expr.parens = parens
 -- Expr : ) 
@@ -575,7 +603,7 @@ local function primary()
     :orElse(softKeyword("false"):as(expr.new("boolean", false)))
     :orElse(softKeyword("nil"):as(expr.new("nil")))
     :orElse(symbol:map(function (sym) return expr.new("identifier", sym) end))
-    -- :orElse(parens(exprFun()))
+    :orElse(parens(exprFun))
 end
 -- FIXME LATER
 local function unary()
@@ -589,6 +617,7 @@ local function unary()
 end
 parser.unary = unary
 -- TODO later
+-- currently short circuits to primary because unary is busted 
 local function call()
   return primary()
 end
@@ -641,7 +670,7 @@ exprFun = function() return letters() end
 --  softKeyword("object"):andThen(identifier)
 
 function lunarp.parse(input)
-  return primary().run(input)
+  return exprFun().run(input)
 end
 
 lunarp.parsec = parser

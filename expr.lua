@@ -27,7 +27,7 @@ function expr.new(name, ...)
 end
 
 function exprmt.__tostring(e)
-  local s = sanePrint(expr.name) .. "("
+  local s = e.name .. "("
   local sep = ""
   for _, v in ipairs(e.args) do
     s = s .. sep .. sanePrint(v)
