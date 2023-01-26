@@ -2,24 +2,76 @@ local lunarp = {}
 
 local expr = require("expr")
 local parser = { expr = {} }
---- @class Parser<T>: { run: fun(input: string): (T | boolean, string | nil) }
+--- @class Parser<T>: { run: fun(self: Parser<T>, input: string): (T | boolean, string | nil) }
 parser.prototype = {}
 local parsermt = { __index = parser.prototype }
-
+local LazyParser = {}
+--- @class LazyParser<T>: { get: fun(): Parser<T> } & Parser<T>
+LazyParser.prototype = {}
+-- Prototypes only include functions
+LazyParser.mt = { __index = function (_, name) return LazyParser.prototype[name] or LazyParser.thunkify(parser.prototype[name]) end }
+parser.lazy = LazyParser
 local helpers = require 'helpers'
 local internals = {}
-
+local Either = require'either'
+local unpack = table.unpack or unpack
 --- @generic T
 --- @param fun fun(input: string): (T | boolean, string | nil) 
 --- @return Parser<T>
 function parser.new(fun) --> Parser<T> 
-  local parse = { run = fun }
+  local parse = { run = function (_, i) return fun(i) end }
   setmetatable(parse, parsermt)
   return parse
 end
 
 
-
+--- @generic T 
+--- @param lazy fun(): Parser<T>
+--- @return LazyParser<T> 
+function LazyParser.new(lazy)
+  return setmetatable({ get = lazy }, LazyParser.mt)
+end
+--- @generic T 
+--- @param self Parser<T> | LazyParser<T> 
+--- @return Parser<T>
+function LazyParser.asStrict(self)
+  if getmetatable(self) == parsermt then
+    --- @cast self Parser<unknown>
+    return self
+  else
+    return self.get()
+  end
+end
+function LazyParser.asLazy(self)
+  if getmetatable(self) == parsermt then
+    return LazyParser.now(self)
+  else
+    return self
+  end
+end
+--- @generic T 
+--- @param strict Parser<T> 
+--- @return LazyParser<T> 
+-- A parser wrapped in a lazy parser. This means it is not lazy.
+function LazyParser.now(strict)
+  return setmetatable({ get = function() return strict end }, LazyParser.mt)
+end
+--- @generic T 
+--- @param fun fun(...: any): Parser<T>
+--- @return fun( ...: any): LazyParser<T>
+function LazyParser.thunkify(fun)
+  return function (...)
+    local args = {...}
+    return LazyParser.new(
+      function ()
+	return fun(unpack(args))
+      end
+    )
+  end
+end
+function LazyParser.prototype:run(input)
+  return self.get():run(input)
+end
 --- @generic T
 --- @generic U
 --- @param l Parser<T>
@@ -28,12 +80,12 @@ end
 function parser.combined(l, r)
   return parser.new(
     function (input)
-      local r1, rest = l.run(input)
+      local r1, rest = l:run(input)
       if rest then
 	if type(r) == "function" then
 	  r = r()
 	end
-	local r2, newRest = r.run(rest)
+	local r2, newRest = r:run(rest)
 	if newRest then
 	  return {left = r1, right = r2}, newRest
 	end
@@ -75,13 +127,14 @@ end
 parser.prototype.thenDiscard = parser.thenDiscard
 --- @generic T 
 --- @generic R 
---- @param self Parser<T>
+--- @param self Parser<T> | LazyParser<T>
 --- @param fun fun(T): R 
 --- @return Parser<R>
 function parser:map(fun)
   return parser.new(
     function (input)
-      local v, rest = self.run(input)
+
+      local v, rest = self:run(input)
       if rest then
 	local nv = fun(v)
 	return nv, rest
@@ -91,6 +144,14 @@ function parser:map(fun)
   )
 end
 parser.prototype.map = parser.map
+
+LazyParser.prototype.map = function (self, fun)
+  return LazyParser.new(
+    function ()
+      return parser.map(self, fun)
+    end
+  )
+end
 --- @generic T 
 --- @generic R 
 --- @param self Parser<T>
@@ -99,10 +160,10 @@ parser.prototype.map = parser.map
 function parser:flatMap(fun)
   return parser.new(
     function (input)
-      local v, rest = self.run(input)
+      local v, rest = LazyParser.asStrict(self):run(input)
       if rest then
 	local np = fun(v)
-	return np.run(rest)
+	return LazyParser.asStrict(np):run(rest)
       end
       return v
     end
@@ -114,16 +175,14 @@ parser.prototype.flatMap = parser.flatMap
 --- @param self Parser<T> 
 --- @param p Parser<V> 
 --- @return Parser<T[]>
+-- FIXME: will obviously break if parser returns false 
 function parser:untilParse(p)
-  if getmetatable(p) ~= parsermt then
-    error("combined only works with parsers")
-  end
   return parser.new(
     function (input)
       local cur = input
       local values = {}
-      while p.run(cur) == false do
-	local r, rest = self.run(cur)
+      while p:run(cur) == false do
+	local r, rest = self:run(cur)
 	if rest then
 	  table.insert(values, r)
 	  cur = rest
@@ -138,6 +197,7 @@ function parser:untilParse(p)
     end
   )
 end
+
 parser.prototype.untilParser = parser.untilParse
 --- @generic T 
 --- @param self Parser<T>
@@ -151,7 +211,7 @@ function parser:rep()
       local values = {}
       while true do
 	local res
-	v, res = self.run(cur)
+	v, res = self:run(cur)
 	if not res then
 	  break
 	end
@@ -178,32 +238,23 @@ parser.prototype.rep0 = parser.rep0
 --- @param self Parser<T> 
 --- @param sep Parser<any>
 --- @return Parser<T[]>
--- this one is smelly too
-function parser:repSep0(sep)
-  return parser.new(
-    function(input)
-      local cur = input
-      local v = nil
-      local values = {}
-      while true do
-	local res
-	v, res = self.run(cur)
-	if not res then
-	  break
-	end
-	table.insert(values, v)
-	cur = res
-	local _, res2 = sep.run(cur)
-	if not res2 then
-	  return values, cur
-	end
-      end
-      -- allows for empty + ending with an extra seperator
-      return values, cur
+function parser:sepBy1(sep)
+  return self:flatMap(
+    function (x)
+      return sep:andThen(self):many():map(function (r) return helpers.cons(x, r) end)
     end
   )
 end
-parser.prototype.repSep0 = parser.repSep0
+function parser:sepBy(sep)
+  return self:sepBy1(sep):orElse(parser.pure {})
+end
+function parser:sepByEnd(sep)
+  return self:sepBy(sep):thenDiscard(sep)
+end
+parser.prototype.sepBy = parser.sepBy
+parser.prototype.sepBy1 = parser.sepBy1
+parser.prototype.sepByEnd = parser.sepByEnd
+
 --- @generic T 
 --- @generic R 
 --- @param self Parser<fun(i: T): R>
@@ -217,15 +268,49 @@ function parser:ap(fa)
   )
 end
 parser.prototype.ap = parser.ap
+
+--- @generic T 
+--- @generic R
+--- @param self Parser<T>
+--- @param ff Parser<fun(i: T): R> 
+--- @return Parser<R>
+function parser:reverseAp(ff)
+  return self:flatMap(
+    function (v)
+      return ff:map(function (f) return f(v) end)
+    end
+  )
+end
+parser.prototype.reverseAp = parser.reverseAp
+--- @generic L, R 
+--- @param l Parser<L>
+--- @param r Parser<R>
+--- @return Parser<Either<L, R>>
+function parser.sum(l, r)
+  return parser.new(
+    function (input)
+      local res, rest = l:run(input)
+      if rest == nil then
+	if res then
+	  return true
+	else
+	  local res2, rest2 = r:run(input)
+	  return Either.Right(res2), rest2
+	end
+      else
+	return Either.Left(res), rest
+      end
+
+    end
+  )
+end
+parser.prototype.sum = parser.sum
 --- @generic T 
 --- @param self Parser<T> 
--- @param start Parser<any>
+--- @param start Parser<any>
 --- @param ending Parser<any>
 --- @return Parser<T>
 function parser:between(start, ending)
-  if getmetatable(start) ~= parsermt or getmetatable(ending) ~= parsermt then
-    error("between only works with parsers, got" .. getmetatable(start))
-  end
   return start:andThen(self):thenDiscard(ending)
 end
 parser.prototype.between = parser.between
@@ -247,7 +332,7 @@ end
 function parser:orElse(p)
   return parser.new(
     function (input)
-      local r, rest = self.run(input)
+      local r, rest = self:run(input)
       if rest == nil then
 	if r then
 	  return true
@@ -255,7 +340,7 @@ function parser:orElse(p)
 	  if type(p) == "function" then
 	    p = p()
 	  end
-	  return p.run(input)
+	  return p:run(input)
 	end
       else
 	return r, rest
@@ -264,6 +349,13 @@ function parser:orElse(p)
   )
 end
 parser.prototype.orElse = parser.orElse
+function LazyParser.prototype:orElse(p)
+  return LazyParser.new(
+    function ()
+      return self.get():orElse(p)
+    end
+  )
+end
 --- @generic T 
 --- @param self Parser<T>
 --- @return Parser<T>
@@ -271,7 +363,7 @@ parser.prototype.orElse = parser.orElse
 function parser:attempted() --> Parser<T>
   return parser.new(
     function (input)
-      local r, rest = self.run(input)
+      local r, rest = self:run(input)
       if not rest then
 	return false
       else
@@ -283,17 +375,17 @@ end
 parser.prototype.attempted = parser.attempted
 --- @generic T 
 --- @param self Parser<T> 
---- @return Parser<nil>
+--- @return Parser<T | nil>
 function parser:optional() --> Parser<nil>
   return parser.new(
     function (input)
-      local r, rest = self.run(input)
+      local r, rest = self:run(input)
       if not rest then
 	if not r then
 	  return nil, input
 	end
       else
-	return nil, rest
+	return r, rest
       end
       return true
     end
@@ -335,12 +427,16 @@ parser.pure = pure
 --- @return Parser<T>
 local function prefix(op, p)
   return op:rep0():map(
-    function (ops, x)
-      return helpers.foldRight(ops, x, function (f, v) return f(v) end)
+    function (ops)
+      return function(x)
+	return helpers.foldRight(ops, x, function (f, v) return f(v) end)
+      end
     end
   ):ap(p)
 end
 parser.prefix = prefix
+--- @param fun fun(i: string): boolean 
+--- @return Parser<string>
 local function takeWhile(fun)
   return parser.new(
     function (input)
@@ -358,6 +454,9 @@ local function takeWhile(fun)
   )
 end
 parser.takeWhile = takeWhile
+function parser.takeWhile0(fun)
+  return takeWhile(fun):orElse(pure"")
+end
 local anyChar =
   parser.new(
     function (input)
@@ -380,7 +479,7 @@ local function charWhere(fun)
 end
 parser.charWhere = charWhere
 local function charIn(str)
-  return charWhere(function (c2) return string.find(str, c2) ~= nil end)
+  return charWhere(function (c2) return string.find(str, c2, 1, true) ~= nil end)
 end
 parser.charIn = charIn
 local function char(c)
@@ -402,20 +501,11 @@ local function stake(input, n) --> string, string
 end
 internals.stake = stake
 
--- A parser of type T is a function of type `string -> (T, string) or bool`
--- It returns a parsed part and the remainder, or whether it consumed input.
 --- @generic T 
 --- @param p Parser<T>
 --- @return Parser<T>
 local function lexeme(p)
-  return parser.new(function (input)
-    local t, rest = p.run(input)
-    if rest then
-      return t, ltrim(rest)
-    else
-      return t
-    end
-  end)
+  return p:attempted():thenDiscard(takeWhile(function (c) return string.find(c, "%s") ~= nil end):optional())
 end
 parser.expr.lexeme = lexeme
 --- @param subOnes Parser<Expr>
@@ -426,16 +516,17 @@ local function operatorFn(subOnes, symbol)
   return subOnes:flatMap(
     function (l)
       return symbol:combined(subOnes):foldLeft(l,
-      function (accum, elem)
-	      local sym = elem.left
-	      local ri = elem.right
-	      -- Operator, name, left, right
-	      return expr.new("operator", sym, accum, ri)
-	    end
+	function (accum, elem)
+	  local sym = elem.left
+	  local ri = elem.right
+	  -- Operator, name, left, right
+	  return expr.new("operator", sym, accum, ri)
+	end
       )
     end
   )
 end
+internals.operator = operatorFn
 local function keyword(word) --> Parser<nil>
   return lexeme(parser.new(function (input)
     local daWord, rest = stake(input, string.len(word))
@@ -472,7 +563,7 @@ local function isDigit(c)
 end
 local identifier =
   lexeme(
-     charWhere(inLetterRange):combined(takeWhile(function (c)
+     charWhere(inLetterRange):combined(parser.takeWhile0(function (c)
 	return inLetterRange(c) or isDigit(c)
      end)):map(
       function (i)
@@ -553,18 +644,23 @@ end
 local operator =
   lexeme(takeWhile(symbolFun))
 parser.expr.operator = operator
+--- @param startsWith string | fun(i: string):boolean
+--- @return Parser<string>
 local function userDefinedOperator(startsWith)
-  local startParser = nil
+  --- @type Parser<string>
+  local startParser
   if type(startsWith) == "function" then
+    --- @cast startsWith fun(i: string): boolean
     startParser = charWhere(startsWith)
   else
+    --- @cast startsWith string
     startParser = charIn(startsWith)
   end
-  return startParser:combined(takeWhile(symbolFun)):map(
+  return lexeme(startParser:combined(parser.takeWhile0(symbolFun)):map(
     function (c)
       return c.left .. c.right
     end
-  )
+  ))
 end
 parser.userDefinedOperator = userDefinedOperator
 local symbol = identifier:orElse(operator)
@@ -573,8 +669,11 @@ local function braces(parser)
   return parser:between(keyword('{'), keyword('}'))
 end
 --]==]
+--- @generic T 
+--- @param p LazyParser<T> 
+--- @return LazyParser<T>
 local function parens(p)
-  return parser.lazyBetween(lexeme(char('(')), p, lexeme(char(')')))
+  return p:between(lexeme(char"("), lexeme(char")"))
 end
 parser.expr.parens = parens
 -- Expr : ) 
@@ -603,27 +702,45 @@ local function primary()
     :orElse(softKeyword("false"):as(expr.new("boolean", false)))
     :orElse(softKeyword("nil"):as(expr.new("nil")))
     :orElse(symbol:map(function (sym) return expr.new("identifier", sym) end))
-    :orElse(parens(exprFun))
+    :orElse(parens(LazyParser.new(exprFun)))
+  end
+local function call()
+  return primary():flatMap(
+    function (e)
+      return parens(
+	LazyParser.new(exprFun):sepByEnd(lexeme(char(",")))
+      ):sum(
+	lexeme(char"."):andThen(symbol)
+      ):foldLeft(e,
+	function (accum, elem)
+	  return elem:condense(
+	    function (l)
+	      return expr.new("call", accum, l)
+	    end,
+	    function (r)
+	      print(r)
+	      return expr.new("field", accum, r)
+	    end
+	  )
+	end
+      )
+    end
+  )
 end
--- FIXME LATER
 local function unary()
-  return prefix(charWhere(function (c) return string.find("~-+!", c) ~= nil end):map(
+  return prefix(charWhere(function (c) return string.find("~-+!", c, 1, true) ~= nil end):map(
     function (s)
       return function(e)
 	return expr.new("unary", s, e)
       end
     end
-  ), primary())
+  ), call())
 end
 parser.unary = unary
--- TODO later
--- currently short circuits to primary because unary is busted 
-local function call()
-  return primary()
-end
+
 local function otherOps()
-  return operatorFn(call(), userDefinedOperator(function (c) return not inLetterRange(c) and
-    string.find("*/%+-:<>=!&^|$_", c) == nil end))
+  return operatorFn(unary(), userDefinedOperator(function (c) return not inLetterRange(c) and symbolFun(c) and
+    string.find("*/%+-:<>=!&^|$_", c, 1, true) == nil end))
 end
 local function mulDivMod()
   return operatorFn(otherOps(), userDefinedOperator("*/%"))
@@ -670,7 +787,7 @@ exprFun = function() return letters() end
 --  softKeyword("object"):andThen(identifier)
 
 function lunarp.parse(input)
-  return exprFun().run(input)
+  return exprFun():run(input)
 end
 
 lunarp.parsec = parser

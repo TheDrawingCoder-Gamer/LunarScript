@@ -13,6 +13,14 @@ local function sanePrint(v)
     end
   elseif t == "nil" then
     return "nil"
+  elseif t == "table" and getmetatable(v) == nil then
+    local s = "{"
+    local sep = ""
+    for k, val in ipairs(v) do
+      s = s .. sep .. sanePrint(k) .. "=" .. sanePrint(val)
+      sep = ", "
+    end
+    return s .. "}"
   else
     return tostring(v)
   end

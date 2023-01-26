@@ -46,5 +46,11 @@ function M.foldRight(list, starting, fun)
   return accum
 end
 
-
+--- @param item any 
+--- @param rest any[] 
+function M.cons(item, rest)
+  local r = M.shallowCopy(rest)
+  table.insert(r, 1, item)
+  return r
+end 
 return M
