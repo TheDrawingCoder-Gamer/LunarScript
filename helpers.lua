@@ -7,7 +7,7 @@ function M.shallowCopy(table)
     error("expected a table")
   end
   local res = {}
-  for k, v in ipairs(table) do
+  for k, v in pairs(table) do
     res[k] = v
   end
   return res
@@ -52,5 +52,36 @@ function M.cons(item, rest)
   local r = M.shallowCopy(rest)
   table.insert(r, 1, item)
   return r
-end 
+end
+function M.sanePrint(v)
+  local t = type(v)
+  if t == "boolean" then
+    if v then
+      return "true"
+    else
+      return "false"
+    end
+  elseif t == "nil" then
+    return "nil"
+  elseif t == "table" and getmetatable(v) == nil then
+    local s = "{"
+    local sep = ""
+    for k, val in pairs(v) do
+      s = s .. sep .. M.sanePrint(k) .. "=" .. M.sanePrint(val)
+      sep = ", "
+    end
+    return s .. "}"
+  else
+    return tostring(v)
+  end
+end
+function M.ADTPrint(e)
+  local s = e.name .. "("
+  local sep = ""
+  for _, v in ipairs(e.args) do
+    s = s .. sep .. M.sanePrint(v)
+    sep = ", "
+  end
+  return s .. ")"
+end
 return M

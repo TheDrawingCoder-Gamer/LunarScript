@@ -2,30 +2,28 @@
 local expr = {}
 --- @class Expr { name: string, args: any[] }
 local exprmt = {}
-
-local function sanePrint(v)
-  local t = type(v)
-  if t == "boolean" then
-    if v then
-      return "true"
-    else
-      return "false"
-    end
-  elseif t == "nil" then
-    return "nil"
-  elseif t == "table" and getmetatable(v) == nil then
-    local s = "{"
-    local sep = ""
-    for k, val in ipairs(v) do
-      s = s .. sep .. sanePrint(k) .. "=" .. sanePrint(val)
-      sep = ", "
-    end
-    return s .. "}"
-  else
-    return tostring(v)
-  end
-end
---- @param name string 
+--- @enum exprs 
+expr.EXPRS = {
+  index = "index",
+  call = "call",
+  field = "field",
+  number = "number",
+  string = "string",
+  boolean = "boolean",
+  null = "nil",
+  identifier = "identifier",
+  operator = "operator",
+  unary = "unary",
+  table = "table",
+  lambda = "lambda",
+  ifExpr = "if",
+  block = "block",
+  -- In lua, parens actually mean something so I have to keep track of them
+  atom = "atom",
+  instance = "instance"
+}
+local helpers = require"helpers"
+--- @param name exprs
 --- @param ... any
 --- @return Expr
 function expr.new(name, ...)
@@ -34,14 +32,6 @@ function expr.new(name, ...)
   return e
 end
 
-function exprmt.__tostring(e)
-  local s = e.name .. "("
-  local sep = ""
-  for _, v in ipairs(e.args) do
-    s = s .. sep .. sanePrint(v)
-    sep = ", "
-  end
-  return s .. ")"
-end
+exprmt.__tostring = helpers.ADTPrint
 
 return expr
