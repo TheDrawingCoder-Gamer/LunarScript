@@ -32,6 +32,23 @@ function expr.new(name, ...)
   return e
 end
 
-exprmt.__tostring = helpers.ADTPrint
+function expr.Index(target, access)
+  return expr.new(expr.EXPRS.index, target, access)
+end
+function expr.Call(target, args)
+  return expr.new(expr.EXPRS.call, target, args)
+end
+function expr.Field(target, name)
+  return expr.new(expr.EXPRS.field, target, name)
+end
+function expr.String(contents)
+  return expr.new(expr.EXPRS.string, contents)
+end
+function expr.Instance(target, name, args)
+  return expr.new(expr.EXPRS.instance, target, name, args)
+end
+function exprmt.__tostring(self)
+  return helpers.ADTPrint("Expr", self)
+end
 
 return expr

@@ -2,6 +2,8 @@ local lunarp = {}
 
 local Expr = require("expr")
 local Stmt = require "stmt"
+local Var = require "var"[1]
+local Field = require"var"[2]
 local parser = { expr = {} }
 --- @class Parser<T>: { run: fun(self: Parser<T>, input: string): (T | boolean, string | nil) }
 parser.prototype = {}
@@ -11,6 +13,15 @@ local LazyParser = {}
 LazyParser.prototype = {}
 -- Prototypes only include functions
 LazyParser.mt = { __index = function (_, name) return LazyParser.prototype[name] or LazyParser.thunkify(parser.prototype[name]) end }
+LazyParser.mtmt = { __index = function (_, name)
+  local parserVers = parser[name]
+  if type(parserVers) == "function" then
+    return LazyParser.thunkify(parser[name])
+  else
+    return parserVers
+  end
+  end }
+setmetatable(LazyParser, LazyParser.mtmt)
 parser.lazy = LazyParser
 local helpers = require 'helpers'
 local internals = {}
@@ -121,8 +132,6 @@ function parser.together(...)
     end
   )
 end
---- @param ...Parser<any> 
---- @return LazyParser<any[]>
 LazyParser.together = LazyParser.thunkify(parser.together)
 --- @generic T
 --- @generic U
@@ -188,7 +197,7 @@ end
 function parser:flatMap(fun)
   return parser.new(
     function (input)
-      local v, rest = LazyParser.asStrict(self):run(input)
+      local v, rest = self:run(input)
       if rest then
 	local np = fun(v)
 	return LazyParser.asStrict(np):run(rest)
@@ -378,6 +387,7 @@ function parser.enum(...)
   end
   return helper(1)
 end
+LazyParser.enum = LazyParser.thunkify(parser.enum)
 --- @generic T 
 --- @param self Parser<T> 
 --- @param start Parser<any>
@@ -422,13 +432,7 @@ function parser:orElse(p)
   )
 end
 parser.prototype.orElse = parser.orElse
-function LazyParser.prototype:orElse(p)
-  return LazyParser.new(
-    function ()
-      return self.get():orElse(p)
-    end
-  )
-end
+
 --- @generic T 
 --- @param self Parser<T>
 --- @return Parser<T>
@@ -595,7 +599,8 @@ local function lexeme(p)
 end
 parser.expr.lexeme = lexeme
 
-parser.hardKeywords = { "if", "when", "else", "fun", "class", "object"}
+--- Some of these keywords may never be used. TOO BAD LOL
+parser.hardKeywords = { "if", "when", "else", "fun", "class", "object", "break", "return", "lazy", "extends", "mixin", "trait", "implements" }
 parser.hardOperators = { "->", "=>", "<-", "=", ":", ":=" }
 -- TODO: What about colon syntax?
 local validChars = "!#$%&*+-/:<=>?@^_|~\\"
@@ -647,18 +652,10 @@ local function validLetter(c)
 end
 
 local function softKeyword(word) --> Parser<nil>
-  if (contains(parser.hardKeywords, word)) then
-    return parser.failure(false)
-  else
-    return lexeme(parser.string(word):notFollowedBy(charWhere(validLetter)))
-  end
+  return lexeme(parser.string(word):notFollowedBy(charWhere(validLetter)))
 end
 local function softOperator(op)
-  if (contains(parser.hardOperators, op)) then
-    return parser.failure(false)
-  else
-    return lexeme(parser.string(op):notFollowedBy(charWhere(symbolFun)))
-  end
+  return lexeme(parser.string(op):notFollowedBy(charWhere(symbolFun)))
 end
 parser.expr.softKeyword = softKeyword
 parser.expr.softOperator = softOperator
@@ -804,6 +801,12 @@ local semicolon = lexeme(char";")
 local expr = LazyParser.null()
 --- @type LazyParser<Stmt>
 local stmt = LazyParser.null()
+--- @type LazyParser<Expr>
+local var
+--- @type LazyParser<Expr>
+local field
+
+local varList = LazyParser.new(function () return var:sepBy1(lexeme(char",")) end)
 --- @type Parser<Expr>
 lunarp.number =
   lexeme(
@@ -825,7 +828,8 @@ local ifExpr =
   return softKeyword("if"):andThen(LazyParser.together(
     parens(expr),
     expr,
-    softKeyword("else"):andThen(expr):optional()
+    -- peace was never an option
+    softKeyword("else"):andThen(expr)
   )):map(
     function (e)
       return Expr.new(Expr.EXPRS.ifExpr, unpack(e))
@@ -857,22 +861,22 @@ local tableElem =
   )
 
 local tableExpr =
-  brackets(
-   tableElem:sepByEnd(lexeme(charIn",;"))
- ):map(
+  lexeme(tableElem:sepByEnd(lexeme(charIn",;")))
+  :between(lexeme(parser.string "$["), lexeme(char"]"))
+  :map(
     function (ls)
       -- don't unpack
       return Expr.new(Expr.EXPRS.table, ls)
     end
  )
- local lambda =
+local lambda =
   parens(lameIdentifier:sepBy(lexeme(char",")))
   :thenDiscard(softOperator "=>"):combined(expr):map(
     function (e)
       return Expr.new(Expr.EXPRS.lambda, e.left, e.right)
     end
   )
-
+local stringExpr = stringParser:map(function (e) return Expr.String(e) end)
 --- TODO: Hook into Stmt.Expr(Expr.If(...))
 local when =
   LazyParser.new(function()
@@ -896,20 +900,15 @@ local returnStmt =
   end):thenDiscard(semicolon)
 local assignStmt =
   LazyParser.new(function()
-    return expr:thenDiscard(softOperator "="):combined(expr):flatMap(
+    return varList:thenDiscard(softOperator "="):combined(expr):flatMap(
       function (e)
-	local target = e.left
-	if target.name == Expr.EXPRS.identifier or target.name == Expr.EXPRS.field then
-	  return pure(Stmt.new(Stmt.STMTS.assign, target, e.right))
-	else
-	  return parser.failure(true)
-	end
+	return pure(Stmt.new(Stmt.STMTS.assign, e.left, e.right))
       end
     )
   end):thenDiscard(semicolon)
 local declare =
   LazyParser.new(function()
-    return identifier:thenDiscard(softOperator ":="):combined(expr):map(
+    return identifier:sepBy1(lexeme(char",")):thenDiscard(softOperator ":="):combined(expr):map(
       function (e)
 	return Stmt.new(Stmt.STMTS.declare, e.left, e.right)
       end
@@ -936,10 +935,19 @@ local exprStmt =
     )
   end)
 stmt = when:orElse(returnStmt):orElse(assignStmt):orElse(breakStmt):orElse(blockStmt):orElse(declare):orElse(exprStmt)
+
+local args =
+  LazyParser.new(
+    function()
+      return LazyParser.now(tableExpr:map(function (e) return {e} end))
+      :orElse(stringExpr:map(function (e) return {e} end))
+      :orElse(parens(expr:sepBy(lexeme(char","))))
+    end
+  )
 --- @return Parser<Expr>
 local function primary()
-  return lunarp.number:attempted()
-    :orElse(stringParser:attempted():map(function (str) return Expr.new(Expr.EXPRS.string, str) end ))
+  return LazyParser.asLazy(lunarp.number:attempted())
+    :orElse(stringExpr)
     :orElse(softKeyword("true"):as(Expr.new(Expr.EXPRS.boolean, true)))
     :orElse(softKeyword("false"):as(Expr.new(Expr.EXPRS.boolean, false)))
     :orElse(softKeyword("nil"):as(Expr.new(Expr.EXPRS.null)))
@@ -951,28 +959,17 @@ local function primary()
     :orElse(parens(expr):map(function (e) return Expr.new(Expr.EXPRS.atom, e) end))
 end
 
+local instanceCall =
+  LazyParser.new(function () return softOperator(":"):andThen(symbol):combined(args):attempted() end)
 local function call()
   return primary():flatMap(
     function (e)
-      return parser.enum(
-      lexeme(char"."):andThen(symbol):attempted(),
-      parens(
-	 expr:sepBy(lexeme(char(",")))
-      ):attempted(),
-      softOperator(":"):andThen(symbol):combined(parens(expr:sepBy(lexeme(char(","))))):attempted(),
-      brackets(expr)
-      ):foldLeft(e,
+      return field:map(function (e) return function(a) return e:asExpr(a) end end)
+      :orElse(args:map(function (e) return function(a) return  Expr.Call(a, e) end end))
+      :orElse(instanceCall:map(function (e) return function (a) return Expr.Instance(a, e.left, e.right) end end))
+      :foldLeft(e,
 	function (accum, elem)
-	  if elem.tag == 1 then
-	    return Expr.new(Expr.EXPRS.field, accum, elem.value)
-	  elseif elem.tag == 2 then
-	    return Expr.new(Expr.EXPRS.call, accum, elem.value)
-	  elseif elem.tag == 3 then
-	    -- Instance is a combination of call and field. It's a special field access immediately followed by a call
-	    return Expr.new(Expr.EXPRS.instance, accum, elem.value.left, elem.value.right)
-	  elseif elem.tag == 4 then
-	    return Expr.new(Expr.EXPRS.index, accum, elem.value)
-	  end
+	  return elem(accum)
 	end
       )
     end
@@ -991,7 +988,7 @@ parser.unary = unary
 
 local function otherOps()
   return operatorFn(unary(), userDefinedOperator(function (c) return not inLetterRange(c) and symbolFun(c) and
-    string.find("*/%+-:<>=!&^|$_", c, 1, true) == nil end))
+    string.find("*/%+-:<>=!&^|$_~", c, 1, true) == nil end))
 end
 local function mulDivMod()
   return operatorFn(otherOps(), userDefinedOperator("*/%"))
@@ -1006,7 +1003,7 @@ local function greatLess()
   return operatorFn(colon(), userDefinedOperator("<>"))
 end
 local function nequal()
-  return operatorFn(greatLess(), userDefinedOperator("!="))
+  return operatorFn(greatLess(), userDefinedOperator("~!="))
 end
 local function andOp()
   return operatorFn(nequal(), userDefinedOperator("&"))
@@ -1026,15 +1023,27 @@ end
 
 expr.get = letters
 
+field =
+  LazyParser.now(lexeme(char".")):andThen(symbol):map(function (f) return Field.Field(f) end)
+  :orElse(brackets(expr):map(function (e) return Field.Index(e) end))
+var =
+  LazyParser.now(identifier:map(function (f) return Var.Name(f) end))
+  :orElse(LazyParser.new(function() return expr:combined(field):map(function(f) return Var.fromField(f.right, f.left) end) end))
 --[[
 local parseFunDecl =
   softKeyword("fun"):andThen(parser.together(
     identifier,
     --- NO FUNNY BUSINESS!
     parens(parser.lameIdentifier:repSep(lexeme(char","))),
+    softOperator("="):as(false):orElse(softOperator(":="):as(true)),
+    expr
 
-  ))
-]]--
+  )):map(
+    function (e)
+
+    end
+  )
+  ]]--
 -- A class is a metatable with a companion table that has a constructor.
 -- No inheritance yet : ) 
 --local parseClassDecl = 

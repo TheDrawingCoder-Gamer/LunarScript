@@ -1,0 +1,24 @@
+hi := 123;
+
+hi = 3;
+
+someFun := () => true;
+
+hi = 1.1;
+
+hi = "123\n\r Ur mom has hepatitis B (she got it from both of my dads)";
+
+helpers := require "helpers";
+
+print(helpers.sanePrint($[1, 2, 3]));
+
+egg := nil || 2;
+
+table := $[];
+
+_G.poluutionaf = "EGG";
+
+table.to = true;
+
+assert(table *> 2 == 2);
+

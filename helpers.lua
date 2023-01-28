@@ -75,8 +75,8 @@ function M.sanePrint(v)
     return tostring(v)
   end
 end
-function M.ADTPrint(e)
-  local s = e.name .. "("
+function M.ADTPrint(name, e)
+  local s = name .. "." .. e.name .. "("
   local sep = ""
   for _, v in ipairs(e.args) do
     s = s .. sep .. M.sanePrint(v)
